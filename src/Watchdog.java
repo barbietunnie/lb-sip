@@ -4,7 +4,21 @@ import java.net.DatagramSocket;
 import java.net.InetAddress;
 import java.net.SocketException;
 
-
+/**
+ * <H1>Watchdog</H1>
+ * Watchdog listens on watchdog port and waits until a datagram arrives.<BR>
+ * <BR>
+ * Once it arrives, a source ip is determined and <I>node pointer</I> points
+ * to source ip of datagram.<BR>
+ * <BR>
+ * This only works if watchdog is enabled, eg. when watchdog port is greater
+ * than 0, and no static nodes are defined.<BR>
+ * <BR>
+ * Currently watchdog does not take into consideration datagram's content.
+ *
+ * @author eigorde
+ *
+ */
 public class Watchdog implements Runnable {
 
     @Override
@@ -14,18 +28,29 @@ public class Watchdog implements Runnable {
 
         DatagramSocket serverSocket = null;
 
+        /*
+         * Open watchdog port for listening.
+         * If it fails, then terminate this thread.
+         */
         try {
             serverSocket = new DatagramSocket(LoadBalancer.watchdogPort);
         } catch (SocketException e) {
-            // TODO Auto-generated catch block
+            // Print error on console.
             e.printStackTrace();
+            // Quit function.
+            return; 
         }
 
-        while (LoadBalancer.alive) {
+        while (true)
             try {
+            	
+            	// Allocate space for new udp datagram.
                 DatagramPacket receivePacket = new DatagramPacket(receiveData, receiveData.length);
 
+                // Wait for new udp datagram.
                 serverSocket.receive(receivePacket);
+                
+                // Extract datagram content.
                 String sentence = new String(receivePacket.getData());
 
                 /*
@@ -52,11 +77,16 @@ public class Watchdog implements Runnable {
                  */
                 LoadBalancer.watchdogTable.put(newNode, System.currentTimeMillis());
                 
+                // Increase stat. counter.
+            	LoadBalancer.stat.watchdogNodes++;
+                
             } catch (IOException e) {
-                // TODO Auto-generated catch block
+                // Print error on console.
                 e.printStackTrace();
+                // Quit while loop.
+                break; 
             }
-        }
+        
         serverSocket.close();
         
     }

@@ -133,7 +133,7 @@ public class McastSync {
      * <I>source ip</I>:<I>source port</I>,<I>destination ip</I>:<I>destination
      * port</I>,<I>bye flag</I><BR>
      * <BR>
-     * </B>Example:<B><BR>
+     * <B>Example:</B><BR>
      * <I>88.20.34.6</I>:<I>5060</I>,<I>192.168.0.1</I>:<I>5060</I>,<I>false</I><BR>
      * <BR>
      * 

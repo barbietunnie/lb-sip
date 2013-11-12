@@ -151,7 +151,8 @@ public class TelnetServer implements Runnable {
         commandList.add(commandHelp);
     }
     
-    @Override
+    @SuppressWarnings("unused")
+	@Override
     public void run() {
         
         telnetClientConnected = false;

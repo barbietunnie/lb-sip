@@ -6,6 +6,7 @@ import java.net.SocketAddress;
 import java.text.DecimalFormat;
 import java.util.Date;
 import java.util.Hashtable;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class LoadBalancer {
 
@@ -62,18 +63,23 @@ public class LoadBalancer {
     /**
      * Call table.
      */
-    final static Hashtable<String, CallType> callTable = new Hashtable<String, CallType>();
+    static ConcurrentHashMap<String, CallType> callTable = new ConcurrentHashMap<String, CallType>();
 
     /**
      * Watchdog table for storing info about nodes which have reported their status to watchdog process.
      */
-    final static Hashtable<String, Long> watchdogTable = new Hashtable<String, Long>();
+    static Hashtable<String, Long> watchdogTable = new Hashtable<String, Long>();
 
     /**
      * Flag to keep dispatcher and other threads running forever.<BR>
      */
-    static boolean alive = true;
+    //static boolean alive = true;
 
+    /**
+     * Statistic data.
+     */
+    static Stat stat = new Stat();
+    
     /**
      * Verbose level. Used by Dispatcher, Synchronizer and Watchdog
      * processes. According to verbosity level, a log function will
@@ -96,7 +102,7 @@ public class LoadBalancer {
                 + "  --bindPort XX  will bind to udp port XX and wait for SIP messages. Default is 5060.\n"
                 + "  --telnetPort XX  will start telnet management interface on tcp port XX and wait for client. Default is 4444.\n"
                 + "  --watchdogPort XX will start watchdog listener on udp port XX. Default is 5556.\n"
-                + "  --verbose X determine the level of logging. If 0, logging is turned off, if 1 only errors are shown (default), 4 is max. verbosity.\n\n"
+                + "  --verbose X determine the level of logging. If 0, logging is turned off, if 1 only errors are shown (default), 3 is max. verbosity.\n\n"
                 + "  node1, node2, ... nodeX are ip addresses of nodes manually defined in case that watchdog service is not in use.\n"
                 + "  If you specify static nodes, then watchdog is disabled, an no new nodes will be added in list for load balancing.\n");        
     }
@@ -175,8 +181,14 @@ public class LoadBalancer {
         anySocket = new InetSocketAddress(bindPort);
         anyDatagramSocket = new DatagramSocket(anySocket);
 
+        /*
+         * Print useful information on which port load balancer is listening.
+         */
         log(Thread.currentThread().getName(), "Listening on: " + bindPort + ".");
-
+        
+        /*
+         * Print list of manually added nodes. 
+         */
         if (nodeList.size() > 0) {
             String nodes = "Node list: ";
             for (Integer key : nodeList.keySet()) {
@@ -192,11 +204,12 @@ public class LoadBalancer {
         Thread dispacherThread = new Thread(new Dispatcher(), "dispacherThread");
         log(Thread.currentThread().getName(), "Starting dispatcher process.");
         dispacherThread.start();
-
-        Thread watchdogThread = new Thread(new Watchdog(), "watchdogThread");
+        
         /*
-         * Check if watchdog is disabled. If not, start watchdog process.
+         * Start watchdog, only if watchdog is enabled.
+         * When node list is not empty, then watchdog is disabled.
          */
+        Thread watchdogThread = new Thread(new Watchdog(), "watchdogThread");
         if (watchdogPort > 0) {
             log(Thread.currentThread().getName(), "Starting watchdog process.");
             watchdogThread.start();
@@ -205,16 +218,25 @@ public class LoadBalancer {
             log(Thread.currentThread().getName(), "Watchdog is disabled.");
         }
         
+        /*
+         * Start synchronization process.
+         */        
         Thread syncThread = new Thread(new Synchronization(), "syncThread");
         log(Thread.currentThread().getName(), "Starting McastSync process.");
         syncThread.start();
-
+        
+        /*
+         * Configure and start telnet service.
+         */
         TelnetServer ts = new TelnetServer(telnetPort);
         configTelnetServer(ts);
         Thread telnetThread = new Thread(ts, "telnetThread");
         log(Thread.currentThread().getName(), "Starting telnet interface.");
         telnetThread.start();
-
+        
+        /*
+         * Synchronize with peers who are already running.
+         */
         McastSync mcastSync = new McastSync();
         log(Thread.currentThread().getName(), "Broadcasting synchronization request message to all peers.");
         mcastSync.requestSync();
@@ -223,7 +245,8 @@ public class LoadBalancer {
     }
     
     /**
-     * This helper function will configure telnet server instance.
+     * This helper function will configure telnet server instance.<BR>
+     * In particular, it adds a commands to auto-complete list.
      * @param ts reference to TelnetServer object
      */
     private static void configTelnetServer(TelnetServer ts) {
@@ -235,6 +258,8 @@ public class LoadBalancer {
         ts.addCommand("show cpu");
         ts.addCommand("show nodes");
         ts.addCommand("show table");
+        ts.addCommand("show bye");
+        ts.addCommand("show stat");
         ts.addCommand("show watchdog");
         
         /*
@@ -290,16 +315,49 @@ public class LoadBalancer {
                 }
                 retVal = sb.toString();
             }
+            else if (command.startsWith("bye")) {
+                StringBuilder sb = new StringBuilder("");
+                sb.append("Call table:\r\nCall ID\t\tSource:port, destination:port\r\n");
+                for (String key : callTable.keySet()) {
+                	/*
+                	 *  Only add calls with bye flag set. 
+                	 */
+                	if (callTable.get(key).bye) {                    
+                		sb.append(key + "\t\t" + callTable.get(key) + "\r\n");
+                	}
+                }
+                if (callTable.isEmpty()) {
+                    sb.append("Empty.\r\n");
+                }
+                else {
+                    sb.append("Total: " + callTable.size() + "\r\n");
+                }
+                retVal = sb.toString();
+            }
             else if (command.startsWith("watchdog")) {
                 StringBuilder sb = new StringBuilder("");
                 sb.append("Watchdog table:\r\nIP address\t\tTime\r\n");
                 for (String key : watchdogTable.keySet()) {
-                    long ago = (System.currentTimeMillis() - watchdogTable.get(key)) / 1000;
-                    sb.append(key + "\t\t" + ago + " sec.\r\n");
+                    long ago = (System.currentTimeMillis() - watchdogTable.get(key));
+                    sb.append(key + "\t\t" + ago + " milisec.\r\n");
                 }
                 if (watchdogTable.isEmpty()) {
                     sb.append("Empty.\r\n");
                 }
+                retVal = sb.toString();
+            }
+            else if (command.startsWith("stat")) {
+                StringBuilder sb = new StringBuilder("");
+                sb.append("Statistic:\r\n");
+                sb.append("SIP INVITE: " + stat.sipInvite + "\r\n");
+                sb.append("SIP BYE: " + stat.sipBye + "\r\n");
+                sb.append("SIP NOT FOUND: " + stat.sipNotFound + "\r\n");
+                sb.append("\r\n");
+                sb.append("Sync. INVITE: " + stat.syncInvite + "\r\n");
+                sb.append("Sync. BYE: " + stat.syncBye + "\r\n");
+                sb.append("Sync. ALL: " + stat.syncAll + "\r\n");
+                sb.append("\r\n");
+                
                 retVal = sb.toString();
             }
             else {
