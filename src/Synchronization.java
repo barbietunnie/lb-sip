@@ -45,9 +45,9 @@ public class Synchronization implements Runnable {
                     /*
                      * Send all call records to peers.
                      */
-                    for (String key : LoadBalancer.callTable.keySet()) {
+                    for (String key : LoadBalancer.getCallRecords()) {
                         callID = key;
-                        callType = LoadBalancer.callTable.get(key);
+                        callType = LoadBalancer.getCallRecord(key);
                         if (LoadBalancer.verbose == 3) {                        
                             LoadBalancer.log(Thread.currentThread().getName(), "CallID " + callID + " broadcasted.");
                         }
@@ -67,14 +67,14 @@ public class Synchronization implements Runnable {
                      */
                     if (callType.bye) {
                     	// Remove call record from table.
-                        LoadBalancer.callTable.remove(callID);
+                        LoadBalancer.removeCallRecord(callID);
                     	
                         // Increase stat. counter.
                     	LoadBalancer.stat.syncBye++;
                     }
                     else {
                     	// Add call record to table.
-                        LoadBalancer.callTable.put(callID, callType);
+                        LoadBalancer.putCallRecord(callID, callType);
                         
                         // Increase stat. counter.
                     	LoadBalancer.stat.syncInvite++;

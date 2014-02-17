@@ -1,7 +1,11 @@
 import java.io.IOException;
 import java.net.DatagramPacket;
+import java.net.DatagramSocket;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
+import java.net.SocketException;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * <H1>Dispatcher</H1>
@@ -21,12 +25,27 @@ import java.net.InetSocketAddress;
  */
 public class Dispatcher implements Runnable {
 
+	public Dispatcher () throws SocketException {
+		/*
+		 * Bind now.
+		 */
+		if (LoadBalancer.anyDatagramSocket == null) {
+			LoadBalancer.anyDatagramSocket = new DatagramSocket(LoadBalancer.bindPort);
+		}		
+	}
+	
     @Override
     public void run() {
 
         byte[] receiveData = new byte[LoadBalancer.BUFFER_LEN];
 
         McastSync mcastSync = new McastSync();
+
+        Collector collector = new Collector(LoadBalancer.anyDatagramSocket);
+
+        List<String> queryNodeList = new ArrayList<String>();
+        
+        long lastCheckNodeTracker = System.currentTimeMillis();
 
         /*
          * Should be done better, eg. to use any port number for sip,
@@ -66,7 +85,7 @@ public class Dispatcher implements Runnable {
                      * SIP INVITE should be distributed across nodes in
                      * node list, or to node which has been last reported to watchdog.
                      */
-                	String currentNode = LoadBalancer.nodePointer;
+                	String currentNode = LoadBalancer.getCurrentNode();
                 	
                 	// Build a new udp datagram.
                     DatagramPacket sendPacket = new DatagramPacket(receiveData, message.length(), new InetSocketAddress(
@@ -74,10 +93,10 @@ public class Dispatcher implements Runnable {
 
                     // Create new call type object which will be stored in call table and send to peers for sync.
                     CallType callType = new CallType(receivePacket.getAddress(), receivePacket.getPort(),
-                    		InetAddress.getByName(LoadBalancer.nodePointer), sipPort);
+                    		InetAddress.getByName(currentNode), sipPort);
                     
                     // Store new call in table.
-                    LoadBalancer.callTable.put(callID, callType);
+                    LoadBalancer.putCallRecord(callID, callType);
 
                     // Sync. with peers.
                     mcastSync.send(callID, callType);
@@ -99,46 +118,66 @@ public class Dispatcher implements Runnable {
                      * that watchdog is disabled. This has to be done
                      * here.
                      */
-                    if (LoadBalancer.watchdogPort == 0 && !LoadBalancer.nodeList.isEmpty()) {
+                	LoadBalancer.updateCurrentNode();
 
-                        for (Integer index = 0; index < LoadBalancer.nodeList.size(); index++) {
-                            if (LoadBalancer.nodeList.get(index).equalsIgnoreCase(LoadBalancer.nodePointer)) {
-                                /*
-                                 * Current node pointer found in list,
-                                 * switch to next one, or first one if
-                                 * we are at last item pointing.
-                                 */
-                                if (index == LoadBalancer.nodeList.size() - 1) {
-                                    LoadBalancer.nodePointer = LoadBalancer.nodeList.get(0);
-                                } else {
-                                    LoadBalancer.nodePointer = LoadBalancer.nodeList.get(index + 1);
-                                }
-
-                                if (LoadBalancer.verbose == 3) {                                
-                                    LoadBalancer.log(Thread.currentThread().getName(), "Next node is " + LoadBalancer.nodePointer + ".");
-                                }
-                                
-                                break;
-                            }
-                        }
-
-                    }
-
+                	/*
+                	 * Check if nodes in tracker list should be updated.
+                	 * But only if SIP OPTIONS tracking is enabled.
+                	 */
+                	long delta = System.currentTimeMillis() - lastCheckNodeTracker;
+                	if (delta > LoadBalancer.helloInterval && LoadBalancer.sipOptions) {
+                		queryNodeList.clear();
+                		lastCheckNodeTracker = System.currentTimeMillis();
+                		
+                		for (Integer index : LoadBalancer.getNodeTrackerKeySet()) {
+                			delta = lastCheckNodeTracker - LoadBalancer.getNodeTracker(index);
+                			String node = LoadBalancer.getNode(index);
+                			if (delta > LoadBalancer.helloInterval) {
+                				/*
+                				 * Query each node that didn't send any packet with in helloInterval time.
+                				 */
+                				collector.sendSipOptions(node, sipPort);
+                				queryNodeList.add(node);
+                			}
+                			else if (delta > LoadBalancer.deadInterval &&
+                					delta < LoadBalancer.deadInterval + LoadBalancer.helloInterval) {
+                    			/*
+                    			 * Dead node.
+                    			 */
+                                if (LoadBalancer.verbose > 1) {                
+                                    LoadBalancer.log(Thread.currentThread().getName(), "Dead node: " + node);
+                                }  
+                			}
+                		}
+                	}
+                	
                 } else {
                     /*
                      * Locate call in call table.
                      */
-                    CallType callPointer = LoadBalancer.callTable.get(callID);
+                    CallType callPointer = LoadBalancer.getCallRecord(callID);
 
                     if (callPointer == null) {
-                        // This is error condition !
-                        if (LoadBalancer.verbose > 0) {                        
-                            LoadBalancer.log(Thread.currentThread().getName(), "callID " + callID + " not found in call table.");
-                        }
-
-                        // Increase stat. counter.
-                    	LoadBalancer.stat.sipNotFound++;
                     	
+                    	if (method.contains("200 OK") &&
+                    			queryNodeList.contains(receivePacket.getAddress().getHostAddress())) {
+                    		/*
+                    		 * This is SIP OK reply to SIP OPTIONS query.
+                    		 * Update node tracker for that ip address.
+                    		 */
+                    		LoadBalancer.updateNodeTracker(receivePacket.getAddress());
+                    		
+                    	}
+                    	else {
+
+                    		// This is error condition !
+                    		if (LoadBalancer.verbose > 0) {                        
+                    			LoadBalancer.log(Thread.currentThread().getName(), "callID " + callID + " not found in call table.");
+                    		}
+
+                    		// Increase stat. counter.
+                    		LoadBalancer.stat.sipNotFound++;
+                    	}
                     } else {
                         
                         if (LoadBalancer.verbose == 3) {                        
@@ -151,10 +190,22 @@ public class Dispatcher implements Runnable {
                          * Check from which direction SIP message came.
                          */
                         if (receivePacket.getAddress().equals(callPointer.dstAddress)) {
+                        	/*
+                        	 * SIP server ---> Load balancer ---> outside network --> remote SIP peer
+                        	 */
                             DatagramPacket sendPacket = new DatagramPacket(receiveData, message.length(), new InetSocketAddress(
                                     callPointer.srcAddress, callPointer.srcPort));
                             LoadBalancer.anyDatagramSocket.send(sendPacket);
+                            
+                            /*
+                             * Update tracker.
+                             */
+                            LoadBalancer.updateNodeTracker(callPointer.dstAddress);
+                            
                         } else {
+                        	/*
+                        	 * Remote SIP peer ---> outside network --> Load balancer ---> SIP server  
+                        	 */                        	
                             DatagramPacket sendPacket = new DatagramPacket(receiveData, message.length(), new InetSocketAddress(
                                     callPointer.dstAddress, callPointer.dstPort));
                             LoadBalancer.anyDatagramSocket.send(sendPacket);
@@ -164,7 +215,7 @@ public class Dispatcher implements Runnable {
                          * Remove call from table if bye flag is set.
                          */
                         if (callPointer.bye) {
-                            LoadBalancer.callTable.remove(callID);
+                            LoadBalancer.removeCallRecord(callID);
                             
                             if (LoadBalancer.verbose == 3) {                            
                                 LoadBalancer.log(Thread.currentThread().getName(), "CallID " + callID + " removed.");

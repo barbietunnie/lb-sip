@@ -3,6 +3,7 @@ import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
 import java.net.SocketException;
+import java.net.UnknownHostException;
 
 /**
  * <H1>Watchdog</H1>
@@ -33,10 +34,24 @@ public class Watchdog implements Runnable {
          * If it fails, then terminate this thread.
          */
         try {
-            serverSocket = new DatagramSocket(LoadBalancer.watchdogPort);
+        	if (LoadBalancer.watchdogInterface != null) {
+        		serverSocket = new DatagramSocket(LoadBalancer.watchdogPort,
+        				InetAddress.getByName(LoadBalancer.watchdogInterface));
+        	}
+        	else {
+        		/*
+        		 * If no interface is specified, then bind to all.
+        		 */
+        		serverSocket = new DatagramSocket(LoadBalancer.watchdogPort);
+        	}
         } catch (SocketException e) {
             // Print error on console.
             e.printStackTrace();
+            // Quit function.
+            return; 
+        } catch (UnknownHostException e) {
+			// TODO Auto-generated catch block
+			e.printStackTrace();
             // Quit function.
             return; 
         }
@@ -70,7 +85,7 @@ public class Watchdog implements Runnable {
                 /*
                  * Set a node pointer to point to new node.
                  */
-                LoadBalancer.nodePointer = newNode;
+                LoadBalancer.setCurrentNode(newNode);
                 
                 /*
                  * Store in table node (sip server) ip address and time.

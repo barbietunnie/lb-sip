@@ -1,11 +1,17 @@
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.IOException;
+import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketException;
+import java.text.DateFormat;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Date;
 import java.util.List;
+
+import javax.swing.text.DateFormatter;
 
 /**
  * <H1>Telnet Server</H1>
@@ -122,19 +128,21 @@ public class TelnetServer implements Runnable {
      * <H1>Telnet server</H1>
      * <BR>
      * This function will start a telnet service
-     * on a given port number.<BR>
+     * on a given interface and port number.<BR>
      * 
+     * @param hostAddress
+     *            local host ip address to bind, if <I>null</I> bind to 0.0.0.0
      * @param port
      *            desired tcp port number
      * @throws IOException
      *             Error in socket communication
      */
-    public TelnetServer(int port) throws IOException {
+    public TelnetServer(String hostAddress, int port) throws IOException {
         portNumber = port;
         terminateFlag = false;
         
-        serverSocket = new ServerSocket(portNumber);
-        
+        serverSocket = new ServerSocket(portNumber, 0, InetAddress.getByName(hostAddress));
+      
         debugFlag = false;
         
         prompt = "--> ";
@@ -590,7 +598,185 @@ public class TelnetServer implements Runnable {
         
         return retVal;
     }
-
+    
+    /**
+     * This helper function will configure telnet server instance.<BR>
+     * In particular, it adds a commands to auto-complete list.<BR>
+     * <B>NOTE</B><BR>
+     * Please customize it to fit application needs.
+     */
+    public void configTelnetServer() {
+        
+        /*
+         * First we add some commands to the list of auto complete commands.
+         */
+        addCommand("show mem");
+        addCommand("show cpu");
+        addCommand("show nodes");
+        addCommand("show table");
+        addCommand("show bye");
+        addCommand("show stat");
+        addCommand("show settings");
+        addCommand("show uptime");
+        addCommand("show watchdog");
+        
+        /*
+         * Turn off debugging so we don't mess up console printouts.
+         */
+        setDebug(false);
+    }
+    
+    /**
+     * Process telnet command.<BR>
+     * <B>NOTE</B><BR>
+     * This is custom function, used by this application.
+     * Please customize it to fit requirements.
+     * @param command name of the command
+     * @return printout or result
+     */
+    private String telnetCommand(String command) {
+        String retVal  = "";
+        
+        if (command.startsWith("show ")) {
+            // Strip show word.
+            command = command.substring("show ".length());
+            
+            Runtime rt = Runtime.getRuntime();
+            
+            final int mb = 1024 * 1024;
+            if (command.startsWith("mem")) {                
+                retVal = "Mem [free/total, max]: "
+                        + (rt.freeMemory() / mb) + "/"
+                        + (rt.totalMemory() /mb) + " MB, "
+                        + (rt.maxMemory() / mb) + " MB\r\n";
+            }
+            else if (command.startsWith("cpu")) {
+                retVal = "CPU core count: " + rt.availableProcessors() + "\r\n";
+            }
+            else if (command.startsWith("nodes")) {
+                retVal = "Node\tLast seen\r\n";
+                if (LoadBalancer.getNodeListKeySet().isEmpty()) {
+                    retVal = retVal + "Empty.\r\n";
+                }
+                else {
+                    for (Integer key : LoadBalancer.getNodeListKeySet()) {
+                    	long lastSeen = LoadBalancer.getNodeTracker(key);
+                    	String lastSeenStr = "-";
+                    	if (lastSeen > 0) {
+                    		lastSeenStr = String.valueOf((System.currentTimeMillis() - lastSeen) / 1000) + " sec.";
+                    	}
+                        retVal = retVal + LoadBalancer.getNode(key) + "\t" + lastSeenStr + "\r\n";
+                    }                	
+                }
+            }
+            else if (command.startsWith("table")) {
+                StringBuilder sb = new StringBuilder("");
+                sb.append("Call table:\r\nCall ID\t\tSource:port, destination:port\r\n");
+                int size = 0;
+                for (String key : LoadBalancer.getCallRecords()) {
+                    sb.append(key + "\t\t" + LoadBalancer.getCallRecord(key) + "\r\n");
+                    size++;
+                }
+                if (size == 0) {
+                    sb.append("Empty.\r\n");
+                }
+                else {
+                    sb.append("Total: " + size + "\r\n");
+                }
+                retVal = sb.toString();
+            }
+            else if (command.startsWith("bye")) {
+                StringBuilder sb = new StringBuilder("");
+                sb.append("Call table:\r\nCall ID\t\tSource:port, destination:port\r\n");
+                int size = 0;
+                for (String key : LoadBalancer.getCallRecords()) {
+                	/*
+                	 *  Only add calls with bye flag set. 
+                	 */
+                	if (LoadBalancer.getCallRecord(key).bye) {                    
+                		sb.append(key + "\t\t" + LoadBalancer.getCallRecord(key) + "\r\n");
+                		size++;
+                	}
+                }
+                if (size == 0) {
+                    sb.append("Empty.\r\n");
+                }
+                else {
+                    sb.append("Total: " + size + "\r\n");
+                }
+                retVal = sb.toString();
+            }
+            else if (command.startsWith("watchdog")) {
+                StringBuilder sb = new StringBuilder("");
+                sb.append("Watchdog table:\r\nIP address\t\tTime\r\n");
+                for (String key : LoadBalancer.watchdogTable.keySet()) {
+                    long ago = (System.currentTimeMillis() - LoadBalancer.watchdogTable.get(key));
+                    sb.append(key + "\t\t" + ago + " milisec.\r\n");
+                }
+                if (LoadBalancer.watchdogTable.isEmpty()) {
+                    sb.append("Empty.\r\n");
+                }
+                retVal = sb.toString();
+            }
+            else if (command.startsWith("stat")) {
+                StringBuilder sb = new StringBuilder("");
+                sb.append("Statistic:\r\n");
+                sb.append("SIP INVITE: " + LoadBalancer.stat.sipInvite + "\r\n");
+                sb.append("SIP BYE: " + LoadBalancer.stat.sipBye + "\r\n");
+                sb.append("SIP NOT FOUND: " + LoadBalancer.stat.sipNotFound + "\r\n");
+                sb.append("\r\n");
+                sb.append("Sync. INVITE: " + LoadBalancer.stat.syncInvite + "\r\n");
+                sb.append("Sync. BYE: " + LoadBalancer.stat.syncBye + "\r\n");
+                sb.append("Sync. ALL: " + LoadBalancer.stat.syncAll + "\r\n");
+                sb.append("\r\n");
+                
+                retVal = sb.toString();
+            }
+            else if (command.startsWith("settings")) {
+                StringBuilder sb = new StringBuilder("");
+                sb.append("Settings\r\n");
+                sb.append("------------------------\r\n");
+                sb.append("Bind port: " + LoadBalancer.bindPort + "\r\n");
+                sb.append("\r\n");
+                sb.append("Telnet interface: " + LoadBalancer.telnetInterface + "\r\n");
+                sb.append("     Telnet port: " + LoadBalancer.telnetPort + "\r\n");
+                sb.append("\r\n");
+                sb.append("Watchdog interface: " + LoadBalancer.watchdogInterface + "\r\n");
+                sb.append("    Watchdog  port: " + LoadBalancer.watchdogPort + "\r\n");
+                sb.append("\r\n");                
+                sb.append("Discovery interface: " + LoadBalancer.discoveryInterface + "\r\n");
+                sb.append("  Discovery timeout: " + LoadBalancer.discoveryTimeout + "\r\n");
+                sb.append("\r\n");
+                sb.append("SIP OPTIONS refresh: " + LoadBalancer.sipOptions + "\r\n");
+                sb.append("     Hello interval: " + LoadBalancer.helloInterval + " msec.\r\n");
+                sb.append("      Dead interval: " + LoadBalancer.deadInterval + " msec.\r\n");
+                sb.append("\r\n");                
+                sb.append("Verbose level: " + LoadBalancer.verbose + "\r\n");
+                sb.append("\r\n");                
+                retVal = sb.toString();            	
+            }
+            else if (command.startsWith("uptime")) {
+            	DateFormat df = DateFormat.getDateInstance(DateFormat.LONG);
+            	retVal = "Since: " + df.format(new Date(LoadBalancer.startedAt)) + "\r\n";
+            }
+            else if (command.startsWith("ver") || command.startsWith("version") ) {
+            	retVal = LoadBalancer.ver + "\r\n";
+            }
+            else {
+                retVal = "Unknown show command:" + command + "\r\n";
+            }
+        }
+        else if (command.startsWith("set ")) {
+            // Strip set word.
+            command = command.substring("set ".length());            
+        }
+        else {
+            retVal = "Unknown command.\r\n";
+        }
+        
+        return retVal;
+    }
+    
     /**
      * Function prototype for processing commands.
      * @param command command name
@@ -608,7 +794,7 @@ public class TelnetServer implements Runnable {
             retVal = commandExit;        
         }
         else {
-            retVal = LoadBalancer.telnetCommand(command);
+            retVal = telnetCommand(command);
         }
         
         return retVal;
