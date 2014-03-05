@@ -13,7 +13,7 @@ public class LoadBalancer {
     /**
      * Version string.
      */
-    final static String ver = "SIP Load Balancer v0.21";
+    final static String ver = "SIP Load Balancer v0.23";
 
     /**
      * Print messages to console.
@@ -129,13 +129,23 @@ public class LoadBalancer {
      * Hello interval, eg. how often nodes are queried.<BR>
      * Unit: msec.
      */
-    final static long helloInterval = 3000;
+    static long helloInterval = 3000;
     
     /**
      * Dead interval, eg. after missing several hellos, consider node dead.<BR>
      * Unit: msec.
      */
-    final static long deadInterval = 10000;
+    static long deadInterval = 10000;
+    
+    /**
+     * Local Register for user authorization.
+     */
+    static Registrator registrator = new Registrator();
+    
+    /**
+     * Realm name, eg. mydomain.com
+     */
+    static String realm = "myDomain";
     
     /**
      * Flag to keep dispatcher and other threads running forever.<BR>
@@ -184,6 +194,8 @@ public class LoadBalancer {
                 + "  SIP OPTIONS will enable periodic checking of nodes in list by sending SIP OPTIONS message.\n"
                 + "  Nodes that reply, are marked as alive, and those that do not replay, are marked dead.\n"
                 + "  This is turned on by default. Please turn it off if you use watchdog service, otherwise results might be unpredictable.\n\n"
+                + "  --realmName [domain]\n"
+                + "  Use custom realm name when processing REGISTER requests.\n\n"
                 + "  --verbose X\n"
                 + "  determine the level of logging. If 0, logging is turned off, if 1 only errors are shown (default), 3 is max. verbosity.\n\n"
                 + "  Node list: [node1] [node2] ... [nodeX] are ip addresses of nodes manually defined in case that watchdog service is not in use.\n"
@@ -211,6 +223,10 @@ public class LoadBalancer {
         nodeList = new Hashtable<Integer, String>();
         nodeTracker = new ConcurrentHashMap<Integer, Long>();
         nodePointer = -1;
+        
+        stat.clear();
+        
+        registrator.dbRead("user.db");
         
         if (args.length == 0) {
             usage();
@@ -247,6 +263,8 @@ public class LoadBalancer {
                         discoveryTimeout = Integer.parseInt(op.getSwitch(switchName));
                     else if (switchName.equalsIgnoreCase("--sipOptions"))
                         sipOptions = op.getSwitch(switchName).equalsIgnoreCase("true");
+                    else if (switchName.equalsIgnoreCase("--realmName"))
+                        realm = op.getSwitch(switchName);
                     else if (switchName.equalsIgnoreCase("--verbose"))
                         verbose = Integer.parseInt(op.getSwitch(switchName));
                     else
@@ -266,6 +284,20 @@ public class LoadBalancer {
             }
             nodePointer = 0;
 
+            /*
+             * Set realm value if not specified.
+             */
+            if (!op.isSwitch("--realmName")) {
+            	realm = System.getenv("HOSTNAME");
+            	if (realm == null) {
+            		// Try again.
+            		realm = System.getenv("COMPUTERNAME");
+            	}
+            	if (realm == null) {
+            		// Set bogus name.
+            		realm = "myDomain";
+            	}
+            }
         }
 
         /*
@@ -384,7 +416,7 @@ public class LoadBalancer {
         ts.configTelnetServer();
         Thread telnetThread = new Thread(ts, "telnetThread");
         if (telnetInterface != null) {        
-        	log(Thread.currentThread().getName(), "Starting telnet interface.");
+        	log(Thread.currentThread().getName(), "Starting telnet interface on " + telnetInterface + ":" + telnetPort + ".");
         	telnetThread.start();
         }
         else {
@@ -395,8 +427,9 @@ public class LoadBalancer {
          * Synchronize with peers who are already running.
          */
         McastSync mcastSync = new McastSync();
-        log(Thread.currentThread().getName(), "Broadcasting synchronization request message to all peers.");
-        mcastSync.requestSync();
+        log(Thread.currentThread().getName(), "Broadcasting synchronization request to all peers.");
+        //mcastSync.requestSync();
+        mcastSync.sendSync();
         mcastSync.close();
 
     }
@@ -461,6 +494,54 @@ public class LoadBalancer {
      */
     public static synchronized String getNode(int index) {
     	return nodeList.get(index);
+    }
+    
+    /**
+     * Add new ip address to node list and tracker list.
+     * @param address ip address of new node
+     */
+    public static synchronized void addNode(String address) {
+    	
+    	int max = 0;
+    	
+    	/*
+    	 * Find next free id value.
+    	 */
+    	for (int id : nodeList.keySet()) {
+    		if (max < id ) {
+    			max = id;
+    		}
+    	}
+    	
+    	int newID = max + 1;
+    	
+    	/*
+    	 * Check that ip address does not exist.
+    	 */
+    	if (getNodeIndex(address) == -1) {
+			nodeList.put(newID, address);
+			nodeTracker.put(newID, System.currentTimeMillis());
+    	}
+    	else {
+    		/*
+    		 * Just refresh node tracker table.
+    		 */
+    		nodeTracker.put(getNodeIndex(address), System.currentTimeMillis());
+    	}
+    }
+    
+    /**
+     * Remove existing ip address from node list and tracker list.
+     * @param address ip address of existing node
+     */
+    public static synchronized void deleteNode(String address) {
+    	
+    	int id = getNodeIndex(address);
+    	
+    	if (id > -1) {
+			nodeList.remove(id);
+			nodeTracker.remove(id);
+    	}
     }
     
     /**

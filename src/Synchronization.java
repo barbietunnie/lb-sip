@@ -1,4 +1,5 @@
 import java.io.IOException;
+import java.util.Map;
 
 /**
  * <H1>Synchronization</H1>
@@ -13,73 +14,80 @@ public class Synchronization implements Runnable {
 
     @Override
     public void run() {
+    	
         McastSync mcastSync = new McastSync();
-        String callID;
-        CallType callType;
+
         while (true)
             try {
             	/*
             	 * Wait for multicast datagram.
             	 */
-                mcastSync.receive();
+            	mcastSync.retrieve();
                 
                 /*
-                 * Extract callID string.
+                 * Check what kind of update / request we received.
                  */
-                callID = mcastSync.getCallID();
-                
-                /*
-                 * Check if callID is "ALL".
-                 */
-                if (callID.equalsIgnoreCase("ALL")) {
-
+            	if (mcastSync.getRequestALL()) {
                 	/*
                 	 * Increase stat. counter.
                 	 */
-                	LoadBalancer.stat.syncAll++;
+                	LoadBalancer.stat.increment(LoadBalancer.stat.SYNC_ALL);
                 	
                     if (LoadBalancer.verbose == 3) {                    
-                        LoadBalancer.log(Thread.currentThread().getName(), "CallID is ALL. Request for all call records is ordered.");
+                        LoadBalancer.log(Thread.currentThread().getName(), "Request for synchronization is ordered.");
                     }
                     
                     /*
                      * Send all call records to peers.
                      */
                     for (String key : LoadBalancer.getCallRecords()) {
-                        callID = key;
-                        callType = LoadBalancer.getCallRecord(key);
+                        String callID = key;
+                        CallType callType = LoadBalancer.getCallRecord(key);
                         if (LoadBalancer.verbose == 3) {                        
                             LoadBalancer.log(Thread.currentThread().getName(), "CallID " + callID + " broadcasted.");
                         }
-                        mcastSync.send(callID, callType);
-                    }
-                } else {
+                        mcastSync.store(callID, callType);
+                    }         
+                    mcastSync.flush();
+            	}
+            	else {
                 	/*
-                	 * Get CallType object.
+                	 * Get new calls (updates).
                 	 */
-                    callType = mcastSync.getCallType();
-                    if (LoadBalancer.verbose == 3) {                    
-                        LoadBalancer.log(Thread.currentThread().getName(), "CallID " + callID + " received.");
-                    }
-                    /*
-                     * Add or remove call record from table,
-                     * depending on bye flag, if it's set or not.
-                     */
-                    if (callType.bye) {
-                    	// Remove call record from table.
-                        LoadBalancer.removeCallRecord(callID);
+                    Map<String, CallType> updates = mcastSync.getReceivedCalls();
+
+                    for (String callID : updates.keySet()) {
+                    	CallType callType = updates.get(callID);
+                    
+                    	if (LoadBalancer.verbose == 3) {                    
+                    		LoadBalancer.log(Thread.currentThread().getName(), "CallID " + callID + " received.");
+                    	}
                     	
-                        // Increase stat. counter.
-                    	LoadBalancer.stat.syncBye++;
+						/*
+						 * Add or remove call record from table, depending on
+						 * bye flag, if it's set or not.
+						 */
+						if (callType.bye) {
+							// Remove call record from table.
+							LoadBalancer.removeCallRecord(callID);
+
+							// Increase stat. counter.
+							LoadBalancer.stat.increment(LoadBalancer.stat.SYNC_BYE);
+						} else {
+							// Add call record to table.
+							LoadBalancer.putCallRecord(callID, callType);
+
+							// Increase stat. counter.
+							LoadBalancer.stat.increment(LoadBalancer.stat.SYNC_INVITE);
+						}
                     }
-                    else {
-                    	// Add call record to table.
-                        LoadBalancer.putCallRecord(callID, callType);
-                        
-                        // Increase stat. counter.
-                    	LoadBalancer.stat.syncInvite++;
-                    }
-                }
+                    
+                    /*
+                     * Clean buffer and make it ready to receive new calls.
+                     */
+                    mcastSync.cleanReceivedCalls();
+            	}
+            	
             } catch (IOException e) {
                 // Print error on console.
                 e.printStackTrace();

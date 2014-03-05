@@ -93,7 +93,7 @@ public class Watchdog implements Runnable {
                 LoadBalancer.watchdogTable.put(newNode, System.currentTimeMillis());
                 
                 // Increase stat. counter.
-            	LoadBalancer.stat.watchdogNodes++;
+            	LoadBalancer.stat.increment(LoadBalancer.stat.WATCHDOG_NODES);
                 
             } catch (IOException e) {
                 // Print error on console.

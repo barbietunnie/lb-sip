@@ -5,13 +5,8 @@ import java.net.InetAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketException;
-import java.text.DateFormat;
-import java.text.SimpleDateFormat;
 import java.util.ArrayList;
-import java.util.Date;
 import java.util.List;
-
-import javax.swing.text.DateFormatter;
 
 /**
  * <H1>Telnet Server</H1>
@@ -118,7 +113,12 @@ public class TelnetServer implements Runnable {
      * Arrow keys up and down change pointer value by 1.
      */
     private int commandHistoryIndexPointer;
-        
+
+    /**
+     * Terminal client window size (width x height).
+     */
+    private int terminalWidth = 80, terminalHeight = 25;
+    
     /**
      * Flag which controls console printouts for debugging.
      */
@@ -221,7 +221,7 @@ public class TelnetServer implements Runnable {
          * Telnet variables.
          * ************************/
         // WINDOW_SIZE, width and height
-        int width = 100, height = 50;
+        int width = getTerminalWidth(), height = getTerminalHeight();
         // TERMINAL_SPEED, separated by , char.
         // Eg 38600,56400
         String terminalSpeed = "";
@@ -322,6 +322,8 @@ public class TelnetServer implements Runnable {
                         if (sbFlag) {
                             width = (buff[idx + 3] << 8) + buff[idx + 4];
                             height = (buff[idx + 5] << 8) + buff[idx + 6];  
+                            setTerminalWidth(width);
+                            setTerminalHeight(height);
                             idx = idx + 6;
                         }
                         else if (willFlag) {
@@ -331,6 +333,8 @@ public class TelnetServer implements Runnable {
                             in.read(newBuff);
                             width = (newBuff[3] << 8) + newBuff[4];
                             height = (newBuff[5] << 8) + newBuff[6];                
+                            setTerminalWidth(width);
+                            setTerminalHeight(height);
                         }
                         else {
                             if (debugFlag)                        
@@ -416,10 +420,8 @@ public class TelnetServer implements Runnable {
                          */
                         if (inputLine.trim().length() > 0) {
                             // put only non-empty non-existing lines in history
-                            if (!commandHistory.contains(inputLine)) {
-                                commandHistory.add(inputLine);
-                                commandHistoryIndexPointer = commandHistory.size() - 1;
-                            }
+                        	commandHistory.add(inputLine);
+                        	commandHistoryIndexPointer = commandHistory.size();
                         }
                         
                         /*
@@ -481,22 +483,27 @@ public class TelnetServer implements Runnable {
                             // Down arrow key: \033[B
 
                             if (inputLine.endsWith("\033[A")) {
-                                String historyCommand = commandHistory.get(commandHistoryIndexPointer);
-                                inputLine = historyCommand;
-                                out.write(("\033[1K\r" + prompt + historyCommand).getBytes());
                                 commandHistoryIndexPointer--;
                                 if (commandHistoryIndexPointer < 0) {
-                                    commandHistoryIndexPointer = commandHistory.size() - 1;
+                                    commandHistoryIndexPointer = 0;
+                                }
+                                else {
+                                	String historyCommand = commandHistory.get(commandHistoryIndexPointer);
+                                	inputLine = historyCommand;
+                                	out.write(("\033[1K\r" + prompt + historyCommand).getBytes());
                                 }
                             }
                             else if (inputLine.endsWith("\033[B")) {
-                                String historyCommand = commandHistory.get(commandHistoryIndexPointer);
-                                inputLine = historyCommand;
-                                out.write(("\033[1K\r" + prompt + historyCommand).getBytes());
                                 commandHistoryIndexPointer++;
-                                if (commandHistoryIndexPointer >= commandHistory.size()) {
-                                    commandHistoryIndexPointer = 0;
+                                if (commandHistoryIndexPointer > commandHistory.size()) {
+                                    commandHistoryIndexPointer =  commandHistory.size();
                                 }
+                                else if (commandHistoryIndexPointer < commandHistory.size()) {
+                                	String historyCommand = commandHistory.get(commandHistoryIndexPointer);
+                                    inputLine = historyCommand;
+                                    out.write(("\033[1K\r" + prompt + historyCommand).getBytes());                                	
+                                }
+
                             }
                         }
                     }
@@ -612,13 +619,27 @@ public class TelnetServer implements Runnable {
          */
         addCommand("show mem");
         addCommand("show cpu");
-        addCommand("show nodes");
-        addCommand("show table");
-        addCommand("show bye");
+        
+        addCommand("show realm");
         addCommand("show stat");
         addCommand("show settings");
         addCommand("show uptime");
         addCommand("show watchdog");
+        
+        addCommand("set sync request");
+        addCommand("set sip options");
+        addCommand("set hello interval");
+        addCommand("set dead interval");
+        addCommand("set verbose");
+        
+        addCommand("node list");
+        addCommand("node add");
+        addCommand("node delete");
+        
+        addCommand("call table show");
+        addCommand("call table bye");
+        
+        addCommand("register show");
         
         /*
          * Turn off debugging so we don't mess up console printouts.
@@ -653,81 +674,26 @@ public class TelnetServer implements Runnable {
             else if (command.startsWith("cpu")) {
                 retVal = "CPU core count: " + rt.availableProcessors() + "\r\n";
             }
-            else if (command.startsWith("nodes")) {
-                retVal = "Node\tLast seen\r\n";
-                if (LoadBalancer.getNodeListKeySet().isEmpty()) {
-                    retVal = retVal + "Empty.\r\n";
-                }
-                else {
-                    for (Integer key : LoadBalancer.getNodeListKeySet()) {
-                    	long lastSeen = LoadBalancer.getNodeTracker(key);
-                    	String lastSeenStr = "-";
-                    	if (lastSeen > 0) {
-                    		lastSeenStr = String.valueOf((System.currentTimeMillis() - lastSeen) / 1000) + " sec.";
-                    	}
-                        retVal = retVal + LoadBalancer.getNode(key) + "\t" + lastSeenStr + "\r\n";
-                    }                	
-                }
-            }
-            else if (command.startsWith("table")) {
-                StringBuilder sb = new StringBuilder("");
-                sb.append("Call table:\r\nCall ID\t\tSource:port, destination:port\r\n");
-                int size = 0;
-                for (String key : LoadBalancer.getCallRecords()) {
-                    sb.append(key + "\t\t" + LoadBalancer.getCallRecord(key) + "\r\n");
-                    size++;
-                }
-                if (size == 0) {
-                    sb.append("Empty.\r\n");
-                }
-                else {
-                    sb.append("Total: " + size + "\r\n");
-                }
-                retVal = sb.toString();
-            }
-            else if (command.startsWith("bye")) {
-                StringBuilder sb = new StringBuilder("");
-                sb.append("Call table:\r\nCall ID\t\tSource:port, destination:port\r\n");
-                int size = 0;
-                for (String key : LoadBalancer.getCallRecords()) {
-                	/*
-                	 *  Only add calls with bye flag set. 
-                	 */
-                	if (LoadBalancer.getCallRecord(key).bye) {                    
-                		sb.append(key + "\t\t" + LoadBalancer.getCallRecord(key) + "\r\n");
-                		size++;
-                	}
-                }
-                if (size == 0) {
-                    sb.append("Empty.\r\n");
-                }
-                else {
-                    sb.append("Total: " + size + "\r\n");
-                }
-                retVal = sb.toString();
-            }
             else if (command.startsWith("watchdog")) {
                 StringBuilder sb = new StringBuilder("");
-                sb.append("Watchdog table:\r\nIP address\t\tTime\r\n");
+                sb.append("Watchdog table:\r\n");
+                sb.append(leftAdjust("IP address", getTerminalWidth() / 3, " ") + leftAdjust("Time", getTerminalWidth() / 3, " ") + "\r\n");
                 for (String key : LoadBalancer.watchdogTable.keySet()) {
                     long ago = (System.currentTimeMillis() - LoadBalancer.watchdogTable.get(key));
-                    sb.append(key + "\t\t" + ago + " milisec.\r\n");
+                    sb.append(leftAdjust(key, getTerminalWidth() / 3, " ") + leftAdjust(String.valueOf(ago), getTerminalWidth() / 3, " ") + " milisec.\r\n");
                 }
                 if (LoadBalancer.watchdogTable.isEmpty()) {
                     sb.append("Empty.\r\n");
                 }
                 retVal = sb.toString();
             }
+            else if (command.startsWith("realm")) {
+            	retVal = LoadBalancer.realm;
+            }
             else if (command.startsWith("stat")) {
                 StringBuilder sb = new StringBuilder("");
                 sb.append("Statistic:\r\n");
-                sb.append("SIP INVITE: " + LoadBalancer.stat.sipInvite + "\r\n");
-                sb.append("SIP BYE: " + LoadBalancer.stat.sipBye + "\r\n");
-                sb.append("SIP NOT FOUND: " + LoadBalancer.stat.sipNotFound + "\r\n");
-                sb.append("\r\n");
-                sb.append("Sync. INVITE: " + LoadBalancer.stat.syncInvite + "\r\n");
-                sb.append("Sync. BYE: " + LoadBalancer.stat.syncBye + "\r\n");
-                sb.append("Sync. ALL: " + LoadBalancer.stat.syncAll + "\r\n");
+                sb.append(LoadBalancer.stat.getStatTable(getTerminalWidth() / 4 - 5));
                 sb.append("\r\n");
                 
                 retVal = sb.toString();
@@ -756,8 +722,19 @@ public class TelnetServer implements Runnable {
                 retVal = sb.toString();            	
             }
             else if (command.startsWith("uptime")) {
-            	DateFormat df = DateFormat.getDateInstance(DateFormat.LONG);
-            	retVal = "Since: " + df.format(new Date(LoadBalancer.startedAt)) + "\r\n";
+            	// Total running time in sec.
+            	long total = (System.currentTimeMillis() - LoadBalancer.startedAt) / 1000;
+            	
+            	long second = total % 60;
+            	total = total / 60;
+            	
+            	long minute = total % 60;
+            	total = total / 60;
+            	
+            	long hour = total % 24;
+            	total = total / 24;
+            	
+            	retVal = "Running: " + total + " days, " + hour + ":" + minute + ":" + second + "\r\n";
             }
             else if (command.startsWith("ver") || command.startsWith("version") ) {
             	retVal = LoadBalancer.ver + "\r\n";
@@ -768,7 +745,160 @@ public class TelnetServer implements Runnable {
         }
         else if (command.startsWith("set ")) {
             // Strip set word.
-            command = command.substring("set ".length());            
+            command = command.substring("set ".length());       
+            
+            if (command.startsWith("sync request")) {
+            	retVal = "Synchronization request sent.\r\n";
+            }
+            else if (command.startsWith("verbose ")) {
+            	String arg = command.substring("verbose ".length());
+            	if (arg.equalsIgnoreCase("0")) {
+            		LoadBalancer.verbose = 0;            		
+            	}
+            	else if (arg.equalsIgnoreCase("1")) {
+            		LoadBalancer.verbose = 1;
+            	}
+            	else if (arg.equalsIgnoreCase("2")) {
+            		LoadBalancer.verbose = 2;
+            	}
+            	else if (arg.equalsIgnoreCase("3")) {
+            		LoadBalancer.verbose = 3;
+            	}
+            	else {
+            		retVal = "Verbose level range: 0 - 3. ";
+            	}
+            	retVal = retVal + "Verbosity set to:" + LoadBalancer.verbose + "\r\n";
+            }
+            else if (command.startsWith("sip options ")) {
+            	String arg = command.substring("sip options ".length());
+            	if (arg.equalsIgnoreCase("on")) {
+            		LoadBalancer.sipOptions = true;
+            	}
+            	else if (arg.equalsIgnoreCase("off")) {
+            		LoadBalancer.sipOptions = false;
+            	}
+            	else {
+            		retVal = "Usage: set sip options [on | off ]. ";
+            	}
+            	if (LoadBalancer.sipOptions) {            	
+            		retVal = retVal + "SIP OPTIONS is on.\r\n";
+            	}
+            	else {
+            		retVal = retVal + "SIP OPTIONS is off.\r\n";
+            	}
+            }
+            else if (command.startsWith("hello interval ")) {
+            	String arg = command.substring("hello interval ".length());
+            	int helloInterval = Integer.parseInt(arg);
+            	if (helloInterval > 100 && helloInterval < 60000) {
+            		LoadBalancer.helloInterval = helloInterval;
+            	}
+            	else {
+            		retVal = "Hello interval range: 100 - 60000 [msec]. ";
+            	}
+            	retVal = retVal + "Hello interval set to: " + LoadBalancer.helloInterval + " msec.\r\n";
+            }
+            else if (command.startsWith("dead interval ")) {
+            	String arg = command.substring("dead interval ".length());
+            	int deadInterval = Integer.parseInt(arg);
+            	if (deadInterval > 100 && deadInterval < LoadBalancer.helloInterval) {
+            		LoadBalancer.deadInterval = deadInterval;
+            	}
+            	else {
+            		retVal = "Dead interval range: 100 - " + LoadBalancer.helloInterval + " [msec]. ";
+            	}
+            	retVal = retVal + "Dead interval set to: " + LoadBalancer.deadInterval + " msec.\r\n";
+            }
+            else {
+            	retVal = "Unknown command: " + command + "\r\n";
+            }
+        }
+        else if (command.startsWith("node ")) {
+            // Strip set word.
+            command = command.substring("node ".length());
+            
+            if (command.startsWith("list")) {
+                retVal = leftAdjust("Node", getTerminalWidth() / 3, " ") + leftAdjust("Last seen", getTerminalWidth() / 3, " ") + "\r\n";
+                if (LoadBalancer.getNodeListKeySet().isEmpty()) {
+                    retVal = retVal + "Empty.\r\n";
+                }
+                else {
+                    for (Integer key : LoadBalancer.getNodeListKeySet()) {
+                    	long lastSeen = LoadBalancer.getNodeTracker(key);
+                    	String lastSeenStr = "-";
+                    	if (lastSeen > 0) {
+                    		lastSeenStr = String.valueOf((System.currentTimeMillis() - lastSeen) / 1000) + " sec.";
+                    	}
+                        retVal = retVal + leftAdjust(LoadBalancer.getNode(key), getTerminalWidth() / 3, " ") +
+                        		leftAdjust(lastSeenStr, getTerminalWidth() / 3, " ") + "\r\n";
+                    }                	
+                }            	
+            }
+            else if (command.startsWith("add ")) {
+            	String arg = command.substring("add ".length());
+            	LoadBalancer.addNode(arg);
+            }
+            else if (command.startsWith("delete ")) {
+            	String arg = command.substring("delete ".length());
+            	LoadBalancer.deleteNode(arg);            	
+            }
+        }
+        else if (command.startsWith("call table ")) {
+            // Strip set word.
+            command = command.substring("call table ".length());
+            
+            if (command.startsWith("show")) {
+                StringBuilder sb = new StringBuilder("");
+                sb.append("Call table:\r\n");
+                sb.append(leftAdjust("Call ID", getTerminalWidth() / 2, " ") +
+                		leftAdjust("Source:port, destination:port", getTerminalWidth() / 3, " ") + "\r\n");
+                int size = 0;
+                for (String key : LoadBalancer.getCallRecords()) {
+                    sb.append(leftAdjust(key, getTerminalWidth() / 2, " ") + 
+                    		leftAdjust(LoadBalancer.getCallRecord(key).toString(), getTerminalWidth() / 3, " ")
+                    		+ "\r\n");
+                    size++;
+                }
+                if (size == 0) {
+                    sb.append("Empty.\r\n");
+                }
+                else {
+                    sb.append("Total: " + size + "\r\n");
+                }
+                retVal = sb.toString();            	
+            }
+            else if (command.startsWith("bye")) {
+                StringBuilder sb = new StringBuilder("");
+                sb.append("Call table (only BYE flag, calls that are about to close):\r\n");
+                sb.append(leftAdjust("Call ID", getTerminalWidth() / 2, " ") +
+                		leftAdjust("Source:port, destination:port", getTerminalWidth() / 3, " ") + "\r\n");
+                int size = 0;
+                for (String key : LoadBalancer.getCallRecords()) {
+                	/*
+                	 *  Only add calls with bye flag set. 
+                	 */
+                	if (LoadBalancer.getCallRecord(key).bye) {                    
+                        sb.append(leftAdjust(key, getTerminalWidth() / 2, " ") + 
+                        		leftAdjust(LoadBalancer.getCallRecord(key).toString(), getTerminalWidth() / 3, " ")
+                        		+ "\r\n");
+                		size++;
+                	}
+                }
+                if (size == 0) {
+                    sb.append("Empty.\r\n");
+                }
+                else {
+                    sb.append("Total: " + size + "\r\n");
+                }
+                retVal = sb.toString();            	
+            }
+        }
+        else if (command.startsWith("register ")) {
+            // Strip set word.
+            command = command.substring("register ".length());
+            if (command.startsWith("show")) {
+            	retVal = LoadBalancer.registrator.getRegisterTable(getTerminalWidth() / 5);
+            }
         }
         else {
             retVal = "Unknown command.\r\n";
@@ -909,7 +1039,32 @@ public class TelnetServer implements Runnable {
         }
         return str.substring(0, endPos);
     }
-    
+	
+    /**
+	 * Left adjustment of string with filler char.<BR>
+	 * If <I>arg</I> is longer then <I>len</I>, then
+	 * return value will be truncated with three dots.
+	 * @param arg string to fill with spaces
+	 * @param len total length, should be greater than <I>arg</I>
+	 * @param fillerChar a char or string which is appended to <I>arg</I>
+	 * @return arg + fillerChar(s)
+	 */
+	private String leftAdjust(String arg, int len, String fillerChar) {
+		String retVal = arg;
+		
+		int argLen = arg.length();
+		
+		if (len > argLen) {
+			for (int i = 0; i < (len - argLen); i++) {
+				retVal = retVal + fillerChar;
+			}
+		}
+		else {
+			retVal = arg.substring(0, len - 3) + "...";
+		}
+		return retVal;
+	}
+	
     /**
      * Terminate telnet service. First make sure no client is connected.
      * @throws IOException
@@ -1026,5 +1181,37 @@ public class TelnetServer implements Runnable {
         this.commandHelp = commandHelp;
         commandList.set(1, commandHelp);
     }
+
+    /**
+     * Terminal size.
+     * @return width, number of chars per line
+     */
+	public int getTerminalWidth() {
+		return terminalWidth;
+	}
+	
+    /**
+     * Terminal size.
+     * @param terminalWidth number of chars per line
+     */
+	public void setTerminalWidth(int terminalWidth) {
+		this.terminalWidth = terminalWidth;
+	}
+	
+    /**
+     * Terminal size.
+     * @return height, number of lines per page
+     */
+	public int getTerminalHeight() {
+		return terminalHeight;
+	}
+	
+    /**
+     * Terminal size.
+     * @param terminalHeight number of lines per page
+     */
+	public void setTerminalHeight(int terminalHeight) {
+		this.terminalHeight = terminalHeight;
+	}
     
 }

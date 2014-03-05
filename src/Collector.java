@@ -224,7 +224,8 @@ public class Collector implements Runnable {
 				"CSeq: 1 OPTIONS",
 				"Contact: <sip:[service]@[local_ip]:[local_port]>",
 				"Accept: application/sdp",
-				"Content-Length: 0"				
+				"Content-Length: 0",
+				""
 		};
 		
 		mapVariable.put("[service]", service);

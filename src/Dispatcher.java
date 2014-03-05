@@ -24,14 +24,15 @@ import java.util.List;
  *
  */
 public class Dispatcher implements Runnable {
-
+	
 	public Dispatcher () throws SocketException {
 		/*
 		 * Bind now.
 		 */
 		if (LoadBalancer.anyDatagramSocket == null) {
 			LoadBalancer.anyDatagramSocket = new DatagramSocket(LoadBalancer.bindPort);
-		}		
+		}
+		
 	}
 	
     @Override
@@ -67,7 +68,15 @@ public class Dispatcher implements Runnable {
                 // Wait for new udp datagram.
                 LoadBalancer.anyDatagramSocket.receive(receivePacket);
 
-                String message = new String(receivePacket.getData());
+                String message = new String(receivePacket.getData(), 0, receivePacket.getLength());
+                
+                /*
+                 * Check for garbage and discard.
+                 */
+                if (receivePacket.getLength() < 10) {
+                	continue;
+                }
+                
                 String method = message.substring(0, message.indexOf('\n') - 1);
                 String callID = message.substring(message.indexOf("Call-ID:") + "Call-ID:".length() + 1,
                         message.indexOf('\n', message.indexOf("Call-ID:")) - 1);
@@ -98,9 +107,9 @@ public class Dispatcher implements Runnable {
                     // Store new call in table.
                     LoadBalancer.putCallRecord(callID, callType);
 
-                    // Sync. with peers.
-                    mcastSync.send(callID, callType);
-
+                    // Immediately sync. with peers.
+                    mcastSync.sendImmediately(callID, callType);
+                    
                     if (LoadBalancer.verbose == 3) {                    
                         LoadBalancer.log(Thread.currentThread().getName(), "Call stored in table [" + callType.srcAddress.getHostAddress() + ":"
                             + callType.srcPort + " --> " + callType.dstAddress.getHostAddress() + ":" + callType.dstPort
@@ -111,7 +120,7 @@ public class Dispatcher implements Runnable {
                     LoadBalancer.anyDatagramSocket.send(sendPacket);
                     
                     // Increase stat. counter.
-                	LoadBalancer.stat.sipInvite++;
+                	LoadBalancer.stat.increment(LoadBalancer.stat.SIP_INVITE);
                 	
                     /*
                      * Adjust nodePointer to next el. in list in case
@@ -135,6 +144,7 @@ public class Dispatcher implements Runnable {
                 			if (delta > LoadBalancer.helloInterval) {
                 				/*
                 				 * Query each node that didn't send any packet with in helloInterval time.
+                				 * This will also query dead nodes. Maybe some of them came up again.
                 				 */
                 				collector.sendSipOptions(node, sipPort);
                 				queryNodeList.add(node);
@@ -142,7 +152,7 @@ public class Dispatcher implements Runnable {
                 			else if (delta > LoadBalancer.deadInterval &&
                 					delta < LoadBalancer.deadInterval + LoadBalancer.helloInterval) {
                     			/*
-                    			 * Dead node.
+                    			 * Dead node. Just report.
                     			 */
                                 if (LoadBalancer.verbose > 1) {                
                                     LoadBalancer.log(Thread.currentThread().getName(), "Dead node: " + node);
@@ -151,7 +161,201 @@ public class Dispatcher implements Runnable {
                 		}
                 	}
                 	
-                } else {
+                }
+                else if (method.contains("REGISTER")) {
+                	/*
+                	 * SIP REGISTER message should update phone
+                	 * table and and store source ip address. 
+                	 */
+                	
+                	
+                	// IP addr. of received packet (from).
+                	String ipAddress = receivePacket.getAddress().getHostAddress();
+                    
+                	// Log for debugging
+            		if (LoadBalancer.verbose == 3) {
+            			/*
+            			 * Output whole message.
+            			 */
+            			LoadBalancer.log(Thread.currentThread().getName(), "REGISTAR request received from " + ipAddress + "\n" + message);
+            		}
+            		else if (LoadBalancer.verbose == 2) {
+            			/*
+            			 * Just inform.
+            			 */
+            			LoadBalancer.log(Thread.currentThread().getName(), "REGISTAR request received from: " + ipAddress);
+            		}
+            		
+                	// Nonce and md5result might be present in REGISTER message
+                	String nonce = "";
+                	String md5result = "";
+                	
+                	// Complete Via, To, From, CSeq, Content-Length, Expires lines of REGISTER message
+                	int idxSpace = method.indexOf(' ');
+                	String requestUri = method.substring(idxSpace + 1,
+                            method.indexOf(' ', idxSpace + 1));
+                    String via = message.substring(message.indexOf("Via:"),
+                            message.indexOf('\n', message.indexOf("Via:")) - 1);
+                    String to = message.substring(message.indexOf("To:"),
+                            message.indexOf('\n', message.indexOf("To:")) - 1);
+                    String from = message.substring(message.indexOf("From:"),
+                            message.indexOf('\n', message.indexOf("From:")) - 1);
+                    String cseq = message.substring(message.indexOf("CSeq:"),
+                            message.indexOf('\n', message.indexOf("CSeq:")) - 1);
+                    String contentLen = message.substring(message.indexOf("Content-Length:"),
+                            message.indexOf('\n', message.indexOf("Content-Length:")) - 1);
+                    String expires = message.substring(message.indexOf("Expires:"),
+                            message.indexOf('\n', message.indexOf("Expires:")) - 1);
+                                        
+                    int idxContact = message.indexOf("Contact:");
+                    String contact = "";
+                    if (idxContact > 0) {
+                    	contact = message.substring(idxContact,
+                    			message.indexOf('\n', idxContact) - 1);
+                    }
+                    else {
+                    	contact = "Contact: <" + requestUri + ">";
+                    }
+                    
+                    /*
+                     * Extract nonce or generate new one.
+                     */
+                    if (message.indexOf("nonce") > 0) {
+                        nonce = message.substring(message.indexOf("nonce") + 7,
+                                message.indexOf('\"', message.indexOf("nonce") + 7));                    	
+                    }
+                    else {
+                    	nonce = String.format("%x", System.currentTimeMillis());
+                    }
+                    
+                    /*
+                     * Try to extract md5 response if possible.
+                     */
+                    if (message.indexOf("Authorization:") > 0) {
+                    	int idxAuthorization = message.indexOf("Authorization:");
+                        String authorization = message.substring(idxAuthorization,
+                                message.indexOf('\n', idxAuthorization));
+                        
+                        int idxResponse = authorization.indexOf("response=");
+                        md5result = authorization.substring(
+                        		idxResponse + 10,
+                        		authorization.indexOf('\"', idxResponse + 10));
+                    }
+                    
+                    /*
+                     * Extract user part in From: line:
+                     * From: <sip:1001@192.168.110.1;transport=UDP>;tag=485af632
+                     * user = 1001
+                     */
+                    String user = from.substring(from.indexOf('<') + 1, from.indexOf('>') - 1);
+                    user = user.substring(0, user.indexOf('@'));
+                    if (user.indexOf(':') > 0) {
+                    	user = user.substring(user.indexOf(':') + 1);
+                    }
+
+                    /*
+                     * Build OK message and replay.
+                     */
+                    String[] okMessage = {
+                    		"SIP/2.0 200 OK",
+                    		via.replaceAll("rport", "received=" + ipAddress),
+                    		from,
+                    		to,            				
+                    		"Call-ID: " + callID,
+                    		cseq,
+                    		"Server: " + LoadBalancer.ver,
+                    		"Allow: INVITE, ACK, CANCEL, OPTIONS, BYE, REFER, SUBSCRIBE, NOTIFY, INFO, PUBLISH",
+                    		"Supported: replaces, timer",                    		
+                    		contact,
+                    		contentLen,
+                    		expires				
+                    };
+
+                    /*
+                     * Build Unauthorized message and replay
+                     */
+                    String[] unauthorizedMessage = {
+                    		"SIP/2.0 401 Unauthorized",
+                    		via + ";received=" + ipAddress + ";rport=" + receivePacket.getPort(),
+                    		from,
+                    		to,            				
+                    		"Call-ID: " + callID,
+                    		cseq,
+                    		"Server: " + LoadBalancer.ver,
+                    		"Allow: INVITE, ACK, CANCEL, OPTIONS, BYE, REFER, SUBSCRIBE, NOTIFY, INFO, PUBLISH",
+                    		"Supported: replaces, timer",
+                    		"WWW-Authenticate: Digest algorithm=MD5, realm=\"" + LoadBalancer.realm + "\", nonce=\"" + nonce + "\"",
+                    		contentLen,				
+                    };
+
+                	
+            		StringBuilder sb = new StringBuilder();
+            		
+            		if (expires.endsWith(" 0")) {
+            			/*
+            			 * Unregister user or phone number when
+            			 *  Expires: 0 
+            			 * line is present in REGISTER message.
+            			 */
+            			LoadBalancer.registrator.unregister(user);
+        				/*
+        				 *  Build OK message.
+        				 */
+        				for (String line : okMessage) {
+        					sb.append(line);
+        					sb.append("\r\n");
+        				} 
+            		}
+            		else {
+            			/*
+            			 * Try to perform register in db.
+            			 */
+            			if (LoadBalancer.registrator.register(user, ipAddress, LoadBalancer.realm, nonce, requestUri, md5result)) {
+            				/*
+            				 *  Build OK message.
+            				 */
+            				for (String line : okMessage) {
+            					sb.append(line);
+            					sb.append("\r\n");
+            				}                		
+            			}
+            			else {
+            				/*
+            				 *  Build Unauthorized message.
+            				 */
+            				for (String line : unauthorizedMessage) {
+            					sb.append(line);
+            					sb.append("\r\n");
+            				}                		
+            			}
+            		}
+            		
+            		sb.append("\r\n");
+            		
+            		String replayMessage = sb.toString();
+            				
+                    // Log for debugging
+            		if (LoadBalancer.verbose == 3) {
+            			/*
+            			 * Output whole message.
+            			 */
+            			LoadBalancer.log(Thread.currentThread().getName(),
+            					"REGISTAR replay sent back to: " + ipAddress + "\n" + replayMessage);
+            		}
+            		else if (LoadBalancer.verbose == 2) {
+            			/*
+            			 * Just inform.
+            			 */
+            			LoadBalancer.log(Thread.currentThread().getName(), "REGISTAR replay sent back to: " + ipAddress);
+            		}
+                    
+                    // Build replay.
+                    DatagramPacket sendPacket = new DatagramPacket(replayMessage.getBytes(), replayMessage.getBytes().length,
+                    		new InetSocketAddress(receivePacket.getAddress(), receivePacket.getPort()));
+                    LoadBalancer.anyDatagramSocket.send(sendPacket);
+                    
+                }
+                else {
                     /*
                      * Locate call in call table.
                      */
@@ -176,7 +380,7 @@ public class Dispatcher implements Runnable {
                     		}
 
                     		// Increase stat. counter.
-                    		LoadBalancer.stat.sipNotFound++;
+                    		LoadBalancer.stat.increment(LoadBalancer.stat.SIP_NOT_FOUND);
                     	}
                     } else {
                         
@@ -221,10 +425,10 @@ public class Dispatcher implements Runnable {
                                 LoadBalancer.log(Thread.currentThread().getName(), "CallID " + callID + " removed.");
                             }
                             
-                            mcastSync.send(callID, callPointer);
+                            mcastSync.sendImmediately(callID, callPointer);
                             
                             // Increase stat. counter.
-                        	LoadBalancer.stat.sipBye++;
+                        	LoadBalancer.stat.increment(LoadBalancer.stat.SIP_BYE);
                         }
 
                         /*
@@ -248,4 +452,5 @@ public class Dispatcher implements Runnable {
         mcastSync.close();
     
     }
+    
 }
